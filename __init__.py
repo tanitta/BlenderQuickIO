@@ -12,10 +12,10 @@ bl_info = {
     "author": "tanitta",
     "version": (0, 0, 0),
     "blender": (2, 91, 0),
-    "location": "<$LOCATION>",
+    "location": "Import-Export",
     "description": "QuickIO",
     "warning": "",
-    "support": "TESTING",
+    "support": "COMMUNITY",
     "wiki_url": "",
     "tracker_url": "",
     "category": "Import-Export"
@@ -83,29 +83,25 @@ class QUICKIO_OT_SetProjectPath(bpy.types.Operator, ImportHelper):
             default="C:/",
             subtype= 'DIR_PATH'
             )
-    filename_ext : ".fbx"
-    # filter_glob: StringProperty(
-    #         default="*.fbx",
-    #         options={'HIDDEN'},
-    #         )
+    filename_ext = ".fbx"
     is_relative: BoolProperty(
             name='Relative path from current .blend file',
             description='Relative path from current .blend file',
             default=False,
             )
-    directory = StringProperty(default="C:/",subtype='DIR_PATH')
-
+    directory : StringProperty(default="C:/",subtype='DIR_PATH')
 
     def set_project_path(self, context, obj):
         job_path = context.scene["quick_io_project_path"]
         directory = self.directory
         if self.is_relative:
+        # if True:
             current_blend_file = bpy.path.abspath('//')
             print("abs: " + current_blend_file)
             directory = os.path.relpath(directory, current_blend_file)
             abspath = os.path.normpath(os.path.join(current_blend_file, directory))
             print("abspath:" + abspath)
-        context.scene["quick_io_project_path"] = directory
+        context.scene["quick_io_project_path"] = str(directory)
         pass
 
     def execute(self, context):
@@ -128,7 +124,7 @@ class QUICKIO_OT_SetFilePath(bpy.types.Operator, ImportHelper):
             name="file path",
             subtype= 'DIR_PATH'
             )
-    filename_ext : ".fbx"
+    filename_ext = ".fbx"
     filter_glob: StringProperty(
             default="*.fbx",
             options={'HIDDEN'},
@@ -213,10 +209,58 @@ class QUICKIO_OT_Import(bpy.types.Operator):
             self.import_root_object(project_path, obj)
         return {'FINISHED'}
 
+def default_setting_path():
+    user_path = bpy.utils.resource_path('USER')
+    config_path = os.path.join(user_path, "scripts", "presets", "operator", "export_scene.fbx")
+    return config_path
+
+class QUICKIO_OT_Preferences(bpy.types.AddonPreferences):
+    bl_idname = __name__
+
+    export_settings_path: bpy.props.StringProperty(
+        name="ExportSettingPath",
+        description="An export setting file(.py)",
+        default = default_setting_path(),
+        subtype='FILE_PATH'
+    )
+
+    def draw(self, context):
+        layout = self.layout
+
+        sp = layout.split(factor=0.3)
+        col = sp.column()
+        col.label(text="ExportSettingPath")
+        col.prop(self, "export_settings_path", text="")
+
+import ast
+def load_settings_from_script(filepath, settings):
+    with open(filepath, 'r') as file:
+        # ファイルから不要な行を削除 (import文と'op ='の行)
+        lines = [line.strip() for line in file if not line.startswith(('import', 'op ='))]
+        # 各行から設定を抽出して辞書に格納
+        for line in lines:
+            if line.startswith('op.'):
+                # 'op.'を削除して解析しやすくする
+                line = line[3:]
+                key, value = line.split(' = ')
+                # 文字列の周りの余分なスペースを削除
+                key = key.strip()
+                value = value.strip()
+                # evalを使ってPythonの式を安全に評価
+                try:
+                    # 安全な評価のためにリテラル評価を使用することを検討
+                    settings[key] = ast.literal_eval(value)
+                    # settings[key] = eval(value, {"__builtins__": {}}, {})
+                except NameError:
+                    # 評価に失敗した場合は値をそのまま格納
+                    settings[key] = value
+    return settings
+
 class QUICKIO_OT_Export(bpy.types.Operator):
     bl_idname = "object.quick_io_export"
     bl_label  = "Export"
     bl_description = "description"
+
 
     def __init__(self):
         pass
@@ -227,6 +271,14 @@ class QUICKIO_OT_Export(bpy.types.Operator):
         self.export_object(project_path, root, targets)
 
     def export_object(self, project_path, root, targets):
+        # deselect
+        for obj in bpy.context.selected_objects:
+            obj.select_set(False)
+
+        # select exported target
+        for obj in targets:
+            obj.select_set(True)
+
         raw_file_path = root["quick_io_file_path"]
         if not os.path.isabs(project_path):
             current_blend_file = bpy.path.abspath('//')
@@ -236,14 +288,16 @@ class QUICKIO_OT_Export(bpy.types.Operator):
         dirname = os.path.dirname(file_path_expanded)
         if not os.path.exists(dirname): os.makedirs(dirname)
 
-        # deselect
-        for obj in bpy.context.selected_objects:
-            obj.select_set(False)
+        
+        prefs = bpy.context.preferences.addons[__name__].preferences
+        export_settings_path = prefs.export_settings_path
+        if "export_settings_path" in obj and obj["export_settings_path"].strip() != "":
+            export_settings_path = obj["export_settings_path"]
 
-        # select exported target
-        for obj in targets:
-            obj.select_set(True)
+        export_settings = {}
 
+        if os.path.isfile(export_settings_path):
+            load_settings_from_script(export_settings_path, export_settings)
 
         memo_location = copy.copy(obj.location)
         memo_rotation = copy.copy(obj.rotation_euler)
@@ -252,45 +306,11 @@ class QUICKIO_OT_Export(bpy.types.Operator):
         if obj["quick_io_ignore_trs_rotation"]: obj.rotation_euler = [0.0, 0.0, 0.0]
         if obj["quick_io_ignore_trs_scale"]:    obj.scale          = [1.0, 1.0, 1.0]
 
-        bpy.ops.export_scene.fbx(
-            filepath=file_path_expanded,
-            # check_existing=True,
-            filter_glob="*.fbx",
-            use_selection=True,
-            use_space_transform = False,
-            # use_active_collection=False,
-            # global_scale=1.0,
-            apply_unit_scale=True,
-            apply_scale_options='FBX_SCALE_ALL',
-            bake_space_transform=True,
-            # object_types={'MESH'},
-            # use_mesh_modifiers=True,
-            # use_mesh_modifiers_render=True,
-            # mesh_smooth_type='OFF',
-            # use_subsurf=False,
-            use_mesh_edges=True,
-            # use_tspace=False,
-            # use_custom_props=False,
-            # add_leaf_bones=True,
-            # primary_bone_axis='Y',
-            # secondary_bone_axis='X',
-            # use_armature_deform_only=False,
-            # armature_nodetype='NULL',
-            # bake_anim=True,
-            # bake_anim_use_all_bones=True,
-            # bake_anim_use_nla_strips=True,
-            # bake_anim_use_all_actions=True,
-            # bake_anim_force_startend_keying=True,
-            # bake_anim_step=1.0,
-            # bake_anim_simplify_factor=1.0,
-            # path_mode='AUTO',
-            # embed_textures=False,
-            # batch_mode='OFF',
-            # use_batch_own_dir=True,
-            # use_metadata=True,
-            # axis_forward='-Z',
-            # axis_up='Y'
-        )
+        export_settings["filepath"] = file_path_expanded
+        export_settings["filter_glob"] = "*.fbx"
+        export_settings["use_selection"] = True
+
+        bpy.ops.export_scene.fbx(**export_settings)
 
         obj.location = memo_location
         obj.rotation_euler = memo_rotation
@@ -321,7 +341,7 @@ class QUICKIO_PT_General(bpy.types.Panel):
     # https://docs.blender.org/api/current/bpy.types.Panel.html#bpy.types.Panel.bl_space_type 
     bl_space_type = "VIEW_3D"
     # https://docs.blender.org/api/current/bpy.types.Panel.html#bpy.types.Panel.bl_region_type 
-    bl_region_type = "TOOLS"
+    bl_region_type = "UI"
     # https://docs.blender.org/api/current/bpy.types.Panel.html#bpy.types.Panel.draw
     def draw(self, context):
         self.layout.operator(QUICKIO_OT_CreateProps.bl_idname)
@@ -330,6 +350,17 @@ class QUICKIO_PT_General(bpy.types.Panel):
         self.layout.operator(QUICKIO_OT_Import.bl_idname)
         self.layout.operator(QUICKIO_OT_Export.bl_idname)
 
+        obj = context.object
+        
+        if obj:
+            row = self.layout.row()
+            row.label(text="Custom Properties", icon='MODIFIER')
+            
+            for prop_name, prop_value in obj.items():
+                row = self.layout.row()
+                # 通常のプロパティではなく、IDプロパティを取得しているため '[]' を使用
+                row.prop(obj, '["{}"]'.format(prop_name), text=prop_name)
+
 classes = [ 
     QUICKIO_OT_CreateProps,
     QUICKIO_OT_SetFilePath,
@@ -337,6 +368,7 @@ classes = [
     QUICKIO_OT_Import,
     QUICKIO_OT_Export,
     QUICKIO_PT_General,
+    QUICKIO_OT_Preferences,
 ]
 
 def register():
